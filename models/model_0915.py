@@ -1,17 +1,8 @@
 
-import math
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 import torch
 import torch.nn.functional as F
 from torch import nn
-
-def set_device():
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-        return torch.device("mps")
-    else:
-        return torch.device("cpu")
 
 # -----------------------------
 # Collate (pad to max length)
@@ -52,7 +43,7 @@ def collate_set_batch(batch: List[Tuple[torch.Tensor, torch.Tensor, Optional[tor
     for s in states:
         pad = Lmax - s.size(1)
         if pad > 0:
-            s = F.pad(s, (0, pad), value=0)  # pad on the right (width dimension)
+            s = F.pad(s, (0, pad), value=0)  # pad on the right
         state_pad.append(s)
     state_padded = torch.stack(state_pad, dim=0) if B>0 else torch.zeros((0,2,0),dtype=torch.long)
 
@@ -67,18 +58,6 @@ def collate_set_batch(batch: List[Tuple[torch.Tensor, torch.Tensor, Optional[tor
     lengths = torch.tensor(lengths, dtype=torch.long)
     return state_padded, delta_t_padded, lengths
 
-# -----------------------------
-# Positional (index) encoding for sets (order-agnostic optional)
-# We'll add a small sinusoidal encoding by element index; doesn't enforce order.
-# -----------------------------
-def sinusoidal_position_encoding(L: int, d: int, device=None) -> torch.Tensor:
-    pe = torch.zeros(L, d, device=device)
-    position = torch.arange(0, L, dtype=torch.float, device=device).unsqueeze(1)
-    div_term = torch.exp(torch.arange(0, d, 2, device=device).float() * (-math.log(10000.0) / d))
-    pe[:, 0::2] = torch.sin(position * div_term)
-    pe[:, 1::2] = torch.cos(position * div_term)
-    return pe
-
 class ResidualMLP(nn.Module):
     def __init__(self, dim: int, hidden: int, p: float = 0.1):
         super().__init__()
@@ -92,11 +71,29 @@ class ResidualMLP(nn.Module):
         h = self.drop(self.fc2(h))
         return self.ln(x + h)
 
-class SetRegressorLarge(nn.Module):
+class PMA(nn.Module):
     """
-    Bigger model for set-to-parameters regression.
+    Pooling by Multihead Attention (k=1). Permutation-invariant pooling.
+    """
+    def __init__(self, d_model: int, nhead: int, dropout: float = 0.1, k: int = 1):
+        super().__init__()
+        self.k = k
+        self.seed = nn.Parameter(torch.randn(k, d_model) * 0.02)
+        self.mha = nn.MultiheadAttention(embed_dim=d_model, num_heads=nhead, dropout=dropout, batch_first=True)
+        self.ln = nn.LayerNorm(d_model)
+
+    def forward(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None):
+        B = x.size(0)
+        Q = self.seed.unsqueeze(0).expand(B, self.k, -1)  # [B, k, d]
+        out, _ = self.mha(Q, x, x, key_padding_mask=key_padding_mask, need_weights=False)
+        out = self.ln(out)
+        return out[:, 0, :] if self.k == 1 else out.mean(dim=1)
+
+class SetRegressorInvariant(nn.Module):
+    """
+    Permutation-invariant set regressor with a configurable Transformer encoder and PMA pooling.
     Inputs:
-        state: Long [B, 2, L]  (s1, s2)
+        state: Long [B, 2, L]  (s1, s2) with 0 as padding
         delta_t: Float [B, L]
         lengths: Long [B]
     Output:
@@ -105,26 +102,23 @@ class SetRegressorLarge(nn.Module):
     def __init__(self,
                  n_state1: int = 128,
                  n_state2: int = 128,
-                 d_model: int = 256,
-                 nhead: int = 8,
-                 num_layers: int = 6,
-                 dim_feedforward: int = 1024,
-                 dt_mlp_hidden: int = 128,
+                 d_model: int = 128,
+                 nhead: int = 4,
+                 num_layers: int = 3,
+                 dim_feedforward: int = 512,
+                 dt_mlp_hidden: int = 64,
                  dropout: float = 0.1):
         super().__init__()
 
-        # Embeddings for two integer states
         self.emb_s1 = nn.Embedding(n_state1, d_model // 2, padding_idx=0)
         self.emb_s2 = nn.Embedding(n_state2, d_model // 2, padding_idx=0)
 
-        # Project scalar delta_t to d_model
         self.dt_mlp = nn.Sequential(
             nn.Linear(1, dt_mlp_hidden),
             nn.GELU(),
             nn.Linear(dt_mlp_hidden, d_model),
         )
 
-        # fuse [state_emb_concat, dt_emb] -> d_model via gated MLP
         self.fuse = nn.Sequential(
             nn.Linear(d_model + d_model, d_model),
             nn.GELU(),
@@ -132,10 +126,6 @@ class SetRegressorLarge(nn.Module):
         )
         self.fuse_ln = nn.LayerNorm(d_model)
 
-        # Learnable [CLS] token
-        self.cls = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
-
-        # Transformer encoder (bigger)
         enc_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
@@ -147,72 +137,64 @@ class SetRegressorLarge(nn.Module):
         )
         self.encoder = nn.TransformerEncoder(enc_layer, num_layers=num_layers)
 
-        # Output head (deeper, residual)
-        self.pre_head = ResidualMLP(d_model, hidden=512, p=dropout)
+        self.pma = PMA(d_model=d_model, nhead=nhead, dropout=dropout, k=1)
+
+        self.pre_head = ResidualMLP(d_model, hidden=max(128, d_model), p=dropout)
         self.head = nn.Sequential(
             nn.LayerNorm(d_model),
-            nn.Linear(d_model, 512),
+            nn.Linear(d_model, max(256, d_model)),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(512, 256),
+            nn.Linear(max(256, d_model), max(128, d_model // 2)),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(256, 3),
+            nn.Linear(max(128, d_model // 2), 3),
         )
 
     def forward(self, state: torch.Tensor, delta_t: torch.Tensor, lengths: torch.Tensor):
-        """
-        state: [B, 2, L] (long)
-        delta_t: [B, L] (float)
-        lengths: [B] (long)
-        """
         device = state.device
-
         B, two, L = state.shape
         assert two == 2, f"expected state with shape [B, 2, L], got {state.shape}"
 
-        s1 = state[:, 0, :]  # [B, L]
-        s2 = state[:, 1, :]  # [B, L]
+        s1 = state[:, 0, :]
+        s2 = state[:, 1, :]
 
-        # Embedding lookup (padding_idx=0 must be reserved)
-        e1 = self.emb_s1(s1.clamp_min_(0))       # [B, L, d/2]
-        e2 = self.emb_s2(s2.clamp_min_(0))       # [B, L, d/2]
-        state_emb = torch.cat([e1, e2], dim=-1)  # [B, L, d_model]
+        e1 = self.emb_s1(s1.clamp_min_(0))
+        e2 = self.emb_s2(s2.clamp_min_(0))
+        state_emb = torch.cat([e1, e2], dim=-1)
 
-        dt_emb = self.dt_mlp(delta_t.unsqueeze(-1))  # [B, L, d_model]
+        dt_emb = self.dt_mlp(delta_t.unsqueeze(-1))
 
-        x = torch.cat([state_emb, dt_emb], dim=-1)   # [B, L, 2*d_model]
-        x = self.fuse_ln(self.fuse(x))               # [B, L, d_model]
+        x = torch.cat([state_emb, dt_emb], dim=-1)
+        x = self.fuse_ln(self.fuse(x))
 
-        # Add a learnable CLS token for pooling
-        cls_tok = self.cls.expand(B, -1, -1)         # [B, 1, d_model]
-        x = torch.cat([cls_tok, x], dim=1)           # [B, 1+L, d_model]
+        arange_L = torch.arange(L, device=device).unsqueeze(0)
+        mask_items = arange_L >= lengths.unsqueeze(1)  # [B, L]
 
-        # Build key padding mask (True for PAD positions)
-        # We have a CLS at position 0 (never masked), elements 1..L correspond to set items.
-        arange_L = torch.arange(L, device=device).unsqueeze(0)          # [1, L]
-        mask_items = arange_L >= lengths.unsqueeze(1)                   # [B, L]
-        key_padding_mask = torch.cat([torch.zeros(B, 1, dtype=torch.bool, device=device), mask_items], dim=1)  # [B, 1+L]
+        h = self.encoder(x, src_key_padding_mask=mask_items)
+        pooled = self.pma(h, key_padding_mask=mask_items)
 
-        # Optional: add sinusoidal encoding to elements (skip CLS)
-        pe = sinusoidal_position_encoding(L, x.size(-1), device=device) if L>0 else torch.zeros((0, x.size(-1)), device=device)
-        if L > 0:
-            x[:, 1:, :] = x[:, 1:, :] + pe.unsqueeze(0)
-
-        # Encode
-        h = self.encoder(x, src_key_padding_mask=key_padding_mask)      # [B, 1+L, d_model]
-
-        # Take CLS representation
-        cls_h = h[:, 0, :]                                              # [B, d_model]
-
-        # Head
-        z = self.pre_head(cls_h)
+        z = self.pre_head(pooled)
         out = self.head(z)
-        out = F.softplus(out)  # positive parameters
-
-        # Return a tuple so that existing code using model(...)[0] won't break
+        out = F.softplus(out)
         return out, None
 
-# Small factory for convenience
-def build_large_model(n_state1: int = 128, n_state2: int = 128) -> SetRegressorLarge:
-    return SetRegressorLarge(n_state1=n_state1, n_state2=n_state2)
+SIZE_PRESETS: Dict[str, Dict] = {
+    # ~5-6M params (depending on vocab sizes)
+    "tiny": dict(d_model=128, nhead=4, num_layers=3, dim_feedforward=512, dt_mlp_hidden=64),
+    # ~9-12M params
+    "small": dict(d_model=160, nhead=4, num_layers=4, dim_feedforward=640, dt_mlp_hidden=80),
+    # ~14-18M params
+    "base": dict(d_model=192, nhead=6, num_layers=4, dim_feedforward=768, dt_mlp_hidden=96),
+    # ~22-30M params
+    "large": dict(d_model=256, nhead=8, num_layers=6, dim_feedforward=1024, dt_mlp_hidden=128),
+}
+
+def build_set_model(size: str = "small", n_state1: int = 128, n_state2: int = 128) -> SetRegressorInvariant:
+    if size not in SIZE_PRESETS:
+        raise ValueError(f"Unknown size '{size}'. Choose from {list(SIZE_PRESETS.keys())}")
+    cfg = SIZE_PRESETS[size]
+    return SetRegressorInvariant(n_state1=n_state1, n_state2=n_state2, **cfg)
+
+def count_parameters(model: nn.Module) -> int:
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
