@@ -1,0 +1,38 @@
+元からある引数（API互換のため残している）
+
+num_categories: int = 4
+    状態の離散値カテゴリ数。
+
+Embeddingの語彙数は num_categories+1（0 は PAD 用）。
+
+embedding_dim: int = 16
+離散状態の埋め込み次元。
+
+pre/post の2種類を埋め込み、合わせて 2 * embedding_dim。
+
+token_hidden1: int = 256, token_hidden2: int = 256
+
+元の設計では「各トークンの特徴を加工する MLP の隠れ次元」。
+互換版では Transformer を導入したため実質未使用。API維持のためダミー。
+output_hidden1: int = 128, output_hidden2: int = 64
+出力側MLPの隠れ層サイズ。最終出力(3次元)の前段。
+dropout: float = 0.2
+Transformer層や MLP にかかるドロップアウト率。
+input_is_one_based: bool = True
+True → 入力stateが 1始まり（PAD=0、カテゴリは1..num_categories）と解釈。
+False → 入力stateが 0始まり（PAD=-1 or 0）をシフトして使う想定。
+device: Optional[torch.device] = None
+明示しなければ set_device() によって "cuda"|"mps"|"cpu" が自動選択される。
+新しく追加した拡張引数（任意）
+d_model: Optional[int] = None
+Transformer内部の特徴次元。
+未指定なら max(128, 4*embedding_dim)。
+nhead: Optional[int] = None
+Multi-Head Attention のヘッド数。
+未指定なら 4（ただし d_model>=192 のときは 8）。
+num_layers: int = 3
+Transformer Encoder の層数。
+大きくすると表現力は上がるが計算コスト・過学習リスクも増える。
+dim_feedforward: Optional[int] = None
+各 Transformer 層内部のFFN（Position-wise MLP）の中間次元。
+未指定なら 4*d_model。

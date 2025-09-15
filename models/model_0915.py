@@ -1,64 +1,105 @@
 
-from typing import List, Tuple, Optional, Dict
+import os
+from typing import List, Optional, Tuple
 import torch
-import torch.nn.functional as F
 from torch import nn
+from torch.utils.data import Dataset
+import torch.nn.functional as F
 
 # -----------------------------
-# Collate (pad to max length)
+# Device helper (unchanged)
 # -----------------------------
-def collate_set_batch(batch: List[Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]]
-                      ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    batch: list of tuples (state, delta_t, lengths_optional)
-        state: LongTensor [2, L]  (two integer features per element: s1, s2)
-        delta_t: FloatTensor [L]
-        lengths_optional: LongTensor [1] or None
+def set_device():
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return torch.device("mps")
+    else:
+        return torch.device("cpu")
 
-    Returns:
-        state_padded: LongTensor [B, 2, Lmax]
-        delta_t_padded: FloatTensor [B, Lmax]
-        lengths: LongTensor [B]
-    """
-    B = len(batch)
-    lengths = []
-    states = []
-    deltas = []
-    for (s, dt, l) in batch:
-        if s is None or s.dim() != 2 or s.size(0) != 2:
-            s = torch.zeros( (2, 0), dtype=torch.long )
-        if dt is None or dt.dim() != 1:
-            dt = torch.zeros( (0,), dtype=torch.float32 )
-        L = s.size(1)
-        if l is None:
-            lengths.append(L)
-        else:
-            lengths.append(int(l.item()) if l.numel()==1 else int(l[0].item()))
-        states.append(s)
-        deltas.append(dt)
+# -----------------------------
+# Dataset class (unchanged API)
+# -----------------------------
+class varSets_Datasets(Dataset):
+    def __init__(self, states, del_t, outputs, transform=None):
+        self.states = states
+        self.del_t = del_t
+        self.outputs = outputs
+        self.transform = transform
 
-    Lmax = max([int(x) for x in lengths]) if lengths else 0
+    def __len__(self):
+        return len(self.states)
 
-    state_pad = []
-    for s in states:
-        pad = Lmax - s.size(1)
-        if pad > 0:
-            s = F.pad(s, (0, pad), value=0)  # pad on the right
-        state_pad.append(s)
-    state_padded = torch.stack(state_pad, dim=0) if B>0 else torch.zeros((0,2,0),dtype=torch.long)
+    def __getitem__(self, idx):
+        state = self.states[idx]
+        delta_t = self.del_t[idx]
+        target = self.outputs[idx]
 
-    delta_pad = []
-    for dt in deltas:
-        pad = Lmax - dt.size(0)
-        if pad > 0:
-            dt = F.pad(dt, (0, pad), value=0.0)
-        delta_pad.append(dt)
-    delta_t_padded = torch.stack(delta_pad, dim=0) if B>0 else torch.zeros((0,0),dtype=torch.float32)
+        if self.transform:
+            state, delta_t = self.transform(state, delta_t)
 
-    lengths = torch.tensor(lengths, dtype=torch.long)
-    return state_padded, delta_t_padded, lengths
+        state = torch.as_tensor(state, dtype=torch.long)
+        delta_t = torch.as_tensor(delta_t, dtype=torch.float32)
+        target = torch.as_tensor(target, dtype=torch.float32)
+        length = torch.tensor(state.shape[1], dtype=torch.long)
+        return state, delta_t, target, length
 
-class ResidualMLP(nn.Module):
+# -----------------------------
+# Collate function (unchanged name & signature)
+# -----------------------------
+def collate_fn(batch):
+    state_batch = [item[0] for item in batch]
+    delta_t_batch = [item[1] for item in batch]
+    target_batch = torch.stack([item[2] for item in batch])
+    lengths = torch.tensor([s.shape[1] for s in state_batch], dtype=torch.long)
+    max_length = int(lengths.max().item()) if lengths.numel() > 0 else 0
+
+    state_padded = []
+    for s in state_batch:
+        L = s.shape[1] if s.dim() == 2 else 0
+        if s.dim() != 2:
+            s = torch.zeros((2, 0), dtype=torch.long)
+            L = 0
+        pad_size = max(0, max_length - L)
+        if pad_size > 0:
+            s = F.pad(s, (0, pad_size), mode="constant", value=0)
+        state_padded.append(s)
+    state_padded = torch.stack(state_padded, dim=0)
+
+    delta_t_padded = []
+    for dt in delta_t_batch:
+        L = dt.shape[0] if dt.dim() == 1 else 0
+        if dt.dim() != 1:
+            dt = torch.zeros((0,), dtype=torch.float32)
+            L = 0
+        pad_size = max(0, max_length - L)
+        if pad_size > 0:
+            dt = F.pad(dt, (0, pad_size), mode="constant", value=0.0)
+        delta_t_padded.append(dt)
+    delta_t_padded = torch.stack(delta_t_padded, dim=0)
+
+    return state_padded, delta_t_padded, target_batch, lengths
+
+# -----------------------------
+# PMA pooling (Permutation-invariant)
+# -----------------------------
+class _PMA(nn.Module):
+    def __init__(self, d_model: int, nhead: int, dropout: float = 0.1, k: int = 1):
+        super().__init__()
+        self.k = k
+        self.seed = nn.Parameter(torch.randn(k, d_model) * 0.02)
+        self.mha = nn.MultiheadAttention(embed_dim=d_model, num_heads=nhead, dropout=dropout, batch_first=True)
+        self.ln = nn.LayerNorm(d_model)
+
+    def forward(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None):
+        # x: [B, L, d_model]
+        B = x.size(0)
+        Q = self.seed.unsqueeze(0).expand(B, self.k, -1)  # [B, k, d]
+        out, _ = self.mha(Q, x, x, key_padding_mask=key_padding_mask, need_weights=False)
+        out = self.ln(out)
+        return out[:, 0, :] if self.k == 1 else out.mean(dim=1)
+
+class _ResidualMLP(nn.Module):
     def __init__(self, dim: int, hidden: int, p: float = 0.1):
         super().__init__()
         self.fc1 = nn.Linear(dim, hidden)
@@ -71,61 +112,66 @@ class ResidualMLP(nn.Module):
         h = self.drop(self.fc2(h))
         return self.ln(x + h)
 
-class PMA(nn.Module):
+# -----------------------------
+# Upgraded model (same class name & __init__ signature)
+# -----------------------------
+class DeepSets_varSets_forDiagnel(nn.Module):
     """
-    Pooling by Multihead Attention (k=1). Permutation-invariant pooling.
+    Drop-in compatible but stronger model:
+    - Strict permutation invariance (no positional encodings)
+    - Transformer encoder over elements (permutation-equivariant)
+    - PMA pooling (k=1) to get a set-level vector
+    - Positive 3-d output via softplus
+    Public API is compatible with the original file.
     """
-    def __init__(self, d_model: int, nhead: int, dropout: float = 0.1, k: int = 1):
+    def __init__(
+        self,
+        num_categories: int = 4,
+        embedding_dim: int = 16,
+        token_hidden1: int = 256,
+        token_hidden2: int = 256,
+        output_hidden1: int = 128,
+        output_hidden2: int = 64,
+        dropout: float = 0.2,
+        input_is_one_based: bool = True,
+        device: Optional[torch.device] = None,
+        # --- new optional knobs with safe defaults ---
+        d_model: Optional[int] = None,     # if None -> max(128, embedding_dim*4)
+        nhead: Optional[int] = None,       # if None -> 4 (or 8 if d_model>=192)
+        num_layers: int = 3,               # default moderate depth
+        dim_feedforward: Optional[int] = None,  # if None -> 4*d_model
+    ):
         super().__init__()
-        self.k = k
-        self.seed = nn.Parameter(torch.randn(k, d_model) * 0.02)
-        self.mha = nn.MultiheadAttention(embed_dim=d_model, num_heads=nhead, dropout=dropout, batch_first=True)
-        self.ln = nn.LayerNorm(d_model)
+        self.device = device if device is not None else set_device()
+        self.input_is_one_based = input_is_one_based
 
-    def forward(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None):
-        B = x.size(0)
-        Q = self.seed.unsqueeze(0).expand(B, self.k, -1)  # [B, k, d]
-        out, _ = self.mha(Q, x, x, key_padding_mask=key_padding_mask, need_weights=False)
-        out = self.ln(out)
-        return out[:, 0, :] if self.k == 1 else out.mean(dim=1)
-
-class SetRegressorInvariant(nn.Module):
-    """
-    Permutation-invariant set regressor with a configurable Transformer encoder and PMA pooling.
-    Inputs:
-        state: Long [B, 2, L]  (s1, s2) with 0 as padding
-        delta_t: Float [B, L]
-        lengths: Long [B]
-    Output:
-        Tuple(pred, None) where pred is Float [B, 3] with softplus activation (positive)
-    """
-    def __init__(self,
-                 n_state1: int = 128,
-                 n_state2: int = 128,
-                 d_model: int = 128,
-                 nhead: int = 4,
-                 num_layers: int = 3,
-                 dim_feedforward: int = 512,
-                 dt_mlp_hidden: int = 64,
-                 dropout: float = 0.1):
-        super().__init__()
-
-        self.emb_s1 = nn.Embedding(n_state1, d_model // 2, padding_idx=0)
-        self.emb_s2 = nn.Embedding(n_state2, d_model // 2, padding_idx=0)
-
-        self.dt_mlp = nn.Sequential(
-            nn.Linear(1, dt_mlp_hidden),
-            nn.GELU(),
-            nn.Linear(dt_mlp_hidden, d_model),
+        # --- Embedding for discrete states (0 = padding reserved) ---
+        # The original design used a single embedding table for categories.
+        # We keep it but use it twice (pre/post) and concatenate, just like before.
+        self.embedding = nn.Embedding(
+            num_embeddings=(num_categories + 1),  # 0..num_categories, 0 is PAD
+            embedding_dim=embedding_dim,
+            padding_idx=0,
         )
 
-        self.fuse = nn.Sequential(
-            nn.Linear(d_model + d_model, d_model),
-            nn.GELU(),
-            nn.Linear(d_model, d_model),
-        )
-        self.fuse_ln = nn.LayerNorm(d_model)
+        # Token feature before encoder: concat(pre_emb, post_emb, dt)
+        token_in_dim = embedding_dim * 2 + 1
 
+        # Project token features up to d_model for the Transformer
+        if d_model is None:
+            d_model = max(128, embedding_dim * 4)
+        self.proj = nn.Sequential(
+            nn.Linear(token_in_dim, d_model),
+            nn.GELU(),
+            nn.LayerNorm(d_model),
+        )
+
+        if nhead is None:
+            nhead = 8 if d_model >= 192 else 4
+        if dim_feedforward is None:
+            dim_feedforward = 4 * d_model
+
+        # Transformer encoder (no positional encodings -> permutation-equivariant)
         enc_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
@@ -137,64 +183,71 @@ class SetRegressorInvariant(nn.Module):
         )
         self.encoder = nn.TransformerEncoder(enc_layer, num_layers=num_layers)
 
-        self.pma = PMA(d_model=d_model, nhead=nhead, dropout=dropout, k=1)
+        # PMA pooling to get set-level vector (permutation-invariant)
+        self.pma = _PMA(d_model=d_model, nhead=nhead, dropout=dropout, k=1)
 
-        self.pre_head = ResidualMLP(d_model, hidden=max(128, d_model), p=dropout)
-        self.head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, max(256, d_model)),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(max(256, d_model), max(128, d_model // 2)),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(max(128, d_model // 2), 3),
-        )
+        # Output head (use original hidden sizes for compatibility spirit)
+        self.pre_head = _ResidualMLP(d_model, hidden=max(output_hidden1, d_model), p=dropout)
+        self.out_fc1 = nn.Linear(d_model, output_hidden1)
+        self.out_ln1 = nn.LayerNorm(output_hidden1)
+        self.out_fc2 = nn.Linear(output_hidden1, output_hidden2)
+        self.out_ln2 = nn.LayerNorm(output_hidden2)
+        self.out_fc3 = nn.Linear(output_hidden2, 3)
 
-    def forward(self, state: torch.Tensor, delta_t: torch.Tensor, lengths: torch.Tensor):
+        # Init similar to original
+        self.apply(self._init_weights)
+
+    @staticmethod
+    def _init_weights(m):
+        if isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.Embedding):
+            nn.init.normal_(m.weight, mean=0.0, std=0.02)
+            if m.padding_idx is not None:
+                with torch.no_grad():
+                    m.weight[m.padding_idx].zero_()
+
+    def _prepare_indices(self, idx: torch.Tensor) -> torch.Tensor:
+        # Match original behavior:
+        # one-based indices: positive stay, non-positive -> 0 (PAD)
+        # zero-based or -1-for-pad: shift by +1 for non-negative, else 0
+        if self.input_is_one_based:
+            idx = torch.where(idx > 0, idx, torch.zeros_like(idx))
+            return idx
+        else:
+            return torch.where(idx >= 0, idx + 1, torch.zeros_like(idx))
+
+    def forward(self, state: torch.Tensor, delta_t: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
         device = state.device
-        B, two, L = state.shape
-        assert two == 2, f"expected state with shape [B, 2, L], got {state.shape}"
+        B, _, L = state.shape
 
-        s1 = state[:, 0, :]
-        s2 = state[:, 1, :]
+        pre = state[:, 0, :]
+        post = state[:, 1, :]
 
-        e1 = self.emb_s1(s1.clamp_min_(0))
-        e2 = self.emb_s2(s2.clamp_min_(0))
-        state_emb = torch.cat([e1, e2], dim=-1)
+        pre_idx = self._prepare_indices(pre)
+        post_idx = self._prepare_indices(post)
 
-        dt_emb = self.dt_mlp(delta_t.unsqueeze(-1))
+        pre_emb = self.embedding(pre_idx)     # [B, L, E]
+        post_emb = self.embedding(post_idx)   # [B, L, E]
+        dt = delta_t.unsqueeze(-1)            # [B, L, 1]
 
-        x = torch.cat([state_emb, dt_emb], dim=-1)
-        x = self.fuse_ln(self.fuse(x))
+        # token features -> projection to d_model
+        x = torch.cat([pre_emb, post_emb, dt], dim=-1)  # [B, L, 2E+1]
+        x = self.proj(x)                                 # [B, L, d_model]
 
+        # padding mask from lengths
         arange_L = torch.arange(L, device=device).unsqueeze(0)
-        mask_items = arange_L >= lengths.unsqueeze(1)  # [B, L]
+        key_padding_mask = arange_L >= lengths.unsqueeze(1)  # [B, L], True=PAD
 
-        h = self.encoder(x, src_key_padding_mask=mask_items)
-        pooled = self.pma(h, key_padding_mask=mask_items)
+        # encode then pool (strictly permutation-invariant overall)
+        h = self.encoder(x, src_key_padding_mask=key_padding_mask)  # [B, L, d_model]
+        pooled = self.pma(h, key_padding_mask=key_padding_mask)     # [B, d_model]
 
+        # output head (retain original spirit & softplus)
         z = self.pre_head(pooled)
-        out = self.head(z)
-        out = F.softplus(out)
-        return out, None
-
-SIZE_PRESETS: Dict[str, Dict] = {
-    # ~5-6M params (depending on vocab sizes)
-    "tiny": dict(d_model=128, nhead=4, num_layers=3, dim_feedforward=512, dt_mlp_hidden=64),
-    # ~9-12M params
-    "small": dict(d_model=160, nhead=4, num_layers=4, dim_feedforward=640, dt_mlp_hidden=80),
-    # ~14-18M params
-    "base": dict(d_model=192, nhead=6, num_layers=4, dim_feedforward=768, dt_mlp_hidden=96),
-    # ~22-30M params
-    "large": dict(d_model=256, nhead=8, num_layers=6, dim_feedforward=1024, dt_mlp_hidden=128),
-}
-
-def build_set_model(size: str = "small", n_state1: int = 128, n_state2: int = 128) -> SetRegressorInvariant:
-    if size not in SIZE_PRESETS:
-        raise ValueError(f"Unknown size '{size}'. Choose from {list(SIZE_PRESETS.keys())}")
-    cfg = SIZE_PRESETS[size]
-    return SetRegressorInvariant(n_state1=n_state1, n_state2=n_state2, **cfg)
-
-def count_parameters(model: nn.Module) -> int:
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+        h = F.gelu(self.out_ln1(self.out_fc1(z)))
+        h = F.gelu(self.out_ln2(self.out_fc2(h)))
+        out = F.softplus(self.out_fc3(h))
+        return out
