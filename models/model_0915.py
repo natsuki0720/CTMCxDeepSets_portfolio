@@ -127,7 +127,7 @@ class DeepSets_varSets_forDiagnel(nn.Module):
     def __init__(
         self,
         num_categories: int = 4,
-        embedding_dim: int = 16,
+        embedding_dim: int = 8,
         token_hidden1: int = 256,
         token_hidden2: int = 256,
         output_hidden1: int = 128,
@@ -159,7 +159,7 @@ class DeepSets_varSets_forDiagnel(nn.Module):
 
         # Project token features up to d_model for the Transformer
         if d_model is None:
-            d_model = max(128, embedding_dim * 4)
+            d_model = max(64, embedding_dim * 2)
         self.proj = nn.Sequential(
             nn.Linear(token_in_dim, d_model),
             nn.GELU(),
@@ -167,7 +167,7 @@ class DeepSets_varSets_forDiagnel(nn.Module):
         )
 
         if nhead is None:
-            nhead = 8 if d_model >= 192 else 4
+            nhead = 4 if d_model >= 192 else 2
         if dim_feedforward is None:
             dim_feedforward = 4 * d_model
 
