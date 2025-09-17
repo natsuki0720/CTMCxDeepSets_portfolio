@@ -44,6 +44,39 @@ class varSets_Datasets(Dataset):
         length = torch.tensor(state.shape[1], dtype=torch.long)
         return state, delta_t, target, length
 
+def collate_fn(batch):
+    state_batch = [item[0] for item in batch]
+    delta_t_batch = [item[1] for item in batch]
+    target_batch = torch.stack([item[2] for item in batch])
+    lengths = torch.tensor([s.shape[1] for s in state_batch], dtype=torch.long)
+    max_length = int(lengths.max().item()) if lengths.numel() > 0 else 0
+
+    state_padded = []
+    for s in state_batch:
+        L = s.shape[1] if s.dim() == 2 else 0
+        if s.dim() != 2:
+            s = torch.zeros((2, 0), dtype=torch.long)
+            L = 0
+        pad_size = max(0, max_length - L)
+        if pad_size > 0:
+            s = F.pad(s, (0, pad_size), mode="constant", value=0)
+        state_padded.append(s)
+    state_padded = torch.stack(state_padded, dim=0)
+
+    delta_t_padded = []
+    for dt in delta_t_batch:
+        L = dt.shape[0] if dt.dim() == 1 else 0
+        if dt.dim() != 1:
+            dt = torch.zeros((0,), dtype=torch.float32)
+            L = 0
+        pad_size = max(0, max_length - L)
+        if pad_size > 0:
+            dt = F.pad(dt, (0, pad_size), mode="constant", value=0.0)
+        delta_t_padded.append(dt)
+    delta_t_padded = torch.stack(delta_t_padded, dim=0)
+
+    return state_padded, delta_t_padded, target_batch, lengths
+
 # ------------------------------------------------------------
 # Model (same name/API) — aggregation dim doubled (256 -> 512)
 # ------------------------------------------------------------
