@@ -117,9 +117,7 @@ class DeepSets_varSets_forDiagnel(nn.Module):
         self.drop = nn.Dropout(dropout)
 
         # ---- Attention pooling over the set (keep structure; match new width) ----
-        # self.att_fc = nn.Linear(token_hidden2, token_hidden2)
-        # self.att_score = nn.Linear(token_hidden2, 1)
-
+        
         # ---- Output MLP (unchanged sizes) ----
         self.out_fc1 = nn.Linear(token_hidden2, output_hidden1)
         self.out_ln1 = nn.LayerNorm(output_hidden1)
@@ -172,14 +170,8 @@ class DeepSets_varSets_forDiagnel(nn.Module):
         arange_L = torch.arange(L, device=device).unsqueeze(0)  # (1, L)
         key_padding_mask = arange_L >= lengths.unsqueeze(1)     # (B, L) True==PAD
 
-        attn_input = torch.tanh(self.att_fc(x))                 # (B, L, H)
-        attn_score = self.att_score(attn_input).squeeze(-1)     # (B, L)
-        attn_score = attn_score.masked_fill(key_padding_mask, float('-inf'))
-        attn_weights = F.softmax(attn_score, dim=1)             # (B, L)
-        pooled = torch.sum(x * attn_weights.unsqueeze(-1), dim=1)  # (B, H)
-
-        # Output MLP
-        h = self.drop(F.gelu(self.out_ln1(self.out_fc1(pooled))))
-        h = self.drop(F.gelu(self.out_ln2(self.out_fc2(h))))
-        out = F.softplus(self.out_fc3(h))  # ensure positivity
-        return out
+        # Average pooling over valid tokens (mask PAD)
+        mask = (~key_padding_mask).unsqueeze(-1).float()       # (B, L, 1)
+        sum_x = (x * mask).sum(dim=1)                          # (B, H)
+        denom = lengths.clamp(min=1).unsqueeze(1).float()      # (B, 1)
+        pooled = sum_x / denom                                  # (B, H)
