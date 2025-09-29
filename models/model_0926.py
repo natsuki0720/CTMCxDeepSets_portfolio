@@ -1,8 +1,13 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.utils.data import Dataset
 from typing import Optional
 
+
+# -----------------------------
+# Device helper (unchanged API)
+# -----------------------------
 def set_device():
     if torch.cuda.is_available():
         return torch.device("cuda")
@@ -10,6 +15,66 @@ def set_device():
         return torch.device("mps")
     else:
         return torch.device("cpu")
+
+# -----------------------------
+# Dataset class (same name/API)
+# -----------------------------
+class varSets_Datasets(Dataset):
+    def __init__(self, states, del_t, outputs, transform=None):
+        self.states = states
+        self.del_t = del_t
+        self.outputs = outputs
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.states)
+
+    def __getitem__(self, idx):
+        state = self.states[idx]
+        delta_t = self.del_t[idx]
+        target = self.outputs[idx]
+
+        if self.transform:
+            state, delta_t = self.transform(state, delta_t)
+
+        state = torch.as_tensor(state, dtype=torch.long)
+        delta_t = torch.as_tensor(delta_t, dtype=torch.float32)
+        target = torch.as_tensor(target, dtype=torch.float32)
+        length = torch.tensor(state.shape[1], dtype=torch.long)
+        return state, delta_t, target, length
+
+def collate_fn(batch):
+    state_batch = [item[0] for item in batch]
+    delta_t_batch = [item[1] for item in batch]
+    target_batch = torch.stack([item[2] for item in batch])
+    lengths = torch.tensor([s.shape[1] for s in state_batch], dtype=torch.long)
+    max_length = int(lengths.max().item()) if lengths.numel() > 0 else 0
+
+    state_padded = []
+    for s in state_batch:
+        L = s.shape[1] if s.dim() == 2 else 0
+        if s.dim() != 2:
+            s = torch.zeros((2, 0), dtype=torch.long)
+            L = 0
+        pad_size = max(0, max_length - L)
+        if pad_size > 0:
+            s = F.pad(s, (0, pad_size), mode="constant", value=0)
+        state_padded.append(s)
+    state_padded = torch.stack(state_padded, dim=0)
+
+    delta_t_padded = []
+    for dt in delta_t_batch:
+        L = dt.shape[0] if dt.dim() == 1 else 0
+        if dt.dim() != 1:
+            dt = torch.zeros((0,), dtype=torch.float32)
+            L = 0
+        pad_size = max(0, max_length - L)
+        if pad_size > 0:
+            dt = F.pad(dt, (0, pad_size), mode="constant", value=0.0)
+        delta_t_padded.append(dt)
+    delta_t_padded = torch.stack(delta_t_padded, dim=0)
+
+    return state_padded, delta_t_padded, target_batch, lengths
 
 # ------------------------------------------------------------
 # Model (same API) — deeper per-token MLP before aggregation
