@@ -6,6 +6,9 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from multiprocessing import get_context
 import argparse
 
+from likelihood import Likelihood_diagonal_exp
+from formate_matrix_toMLData import formate_dataMatrix, matrix_trimer
+
 from data_generator import (
     DataGenerator,
     DiagonalTransitionRateMatrixGenerator,
@@ -41,6 +44,14 @@ def _seed_for_index(base_seed: int, idx: int) -> int:
     ss = np.random.SeedSequence([base_seed, idx])
     return int(ss.generate_state(1)[0])
 
+def _insert_likelihood_results(M: np.ndarray,) -> np.ndarray:
+    mt = matrix_trimer(M)
+    data = mt.trim_data(start=3)
+    ll = Likelihood_diagonal_exp(data, num_state=4)
+    Q_ll = ll.optimize(np.array([-0.5,-1,-1.5]))
+    new_M = np.insert(M,3,Q_ll,axis=0)
+    return new_M
+
 
 def _one_dataset_job(idx: int, out_dir: str, states: int, lifespan: float,
                      min_n: int, max_n: int, base_seed: int) -> str:
@@ -64,7 +75,7 @@ def _one_dataset_job(idx: int, out_dir: str, states: int, lifespan: float,
     # n_intervals をランダム化した DirichletDeltaT を利用
     del_t_gen = DirichletDeltaT(min_intervals=2, max_intervals=10, rng=rng)
     M = dg.generate_matrix(del_t_gen.sample)
-
+    M = _insert_likelihood_results(M)
     # CSV出力
     dg.generate_dataFile(M, name, str(out))
     return str(out / name)
@@ -106,6 +117,20 @@ def _run_parallel_from_args(args):
 
 
 if __name__ == "__main__":
-    args = _parse_args_parallel()
-    if args.run_parallel:
+    import copy
+    base_args = _parse_args_parallel()
+    l = [
+        100,200,400,600,800,1000
+    ]
+    if not base_args.run_parallel:
+        raise SystemExit("run_parallel を有効にしてください")
+    
+    for n in l:
+        args = copy.hardcopy(base_args)
+        args.min_n = n
+        args.max_n = n
+        args.out_dir = base_args.out_dir + f"/data_n{n}"
         _run_parallel_from_args(args)
+
+    
+        

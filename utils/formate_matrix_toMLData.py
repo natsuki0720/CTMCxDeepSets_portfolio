@@ -8,11 +8,13 @@ class matrix_trimer:
         self.num_state = self.matrix.shape[1]
         
     # 推移率行列を取得
-    def trim_transitionRateMatrix(self):
-        return self.matrix[:self.num_state, :self.num_state]
+    def trim_transitionRateMatrix(self, start = 0, end = None):
+        if end is None:
+            end = self.num_state
+        return self.matrix[start:end, :self.num_state]
     # データを取得
-    def trim_data(self):
-        temp_M = self.matrix[self.num_state:]
+    def trim_data(self,start = 3):
+        temp_M = self.matrix[start:]
         data = temp_M[:,:3]
         return data
 
