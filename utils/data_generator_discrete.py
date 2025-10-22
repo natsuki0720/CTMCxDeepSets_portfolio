@@ -49,7 +49,7 @@ def _insert_likelihood_results(M: np.ndarray,) -> np.ndarray:
     data = mt.trim_data(start=3)
     ll = Likelihood_diagonal_exp(data, num_state=4)
     Q_ll = ll.optimize(np.array([-0.5,-1,-1.5]))
-    new_M = np.insert(M,3,Q_ll,axis=0)
+    new_M = np.insert(M,4,Q_ll,axis=0)
     return new_M
 
 
@@ -127,6 +127,9 @@ if __name__ == "__main__":
     
     for n in l:
         args = copy.deepcopy(base_args)
+        print(args.base_seed)
+        args.base_seed += n
+        print(args.base_seed)
         args.min_n = n
         args.max_n = n
         args.out_dir = base_args.out_dir + f"/testdata_n{n}"
