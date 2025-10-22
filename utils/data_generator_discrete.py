@@ -126,10 +126,10 @@ if __name__ == "__main__":
         raise SystemExit("run_parallel を有効にしてください")
     
     for n in l:
-        args = copy.hardcopy(base_args)
+        args = copy.deepcopy(base_args)
         args.min_n = n
         args.max_n = n
-        args.out_dir = base_args.out_dir + f"/data_n{n}"
+        args.out_dir = base_args.out_dir + f"/testdata_n{n}"
         _run_parallel_from_args(args)
 
     
