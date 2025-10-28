@@ -23,7 +23,11 @@ def _insert_likelihood_results(M: np.ndarray,start: int) -> np.ndarray:
     return new_M
 
 def _one_dataset_job(idx: int, out_dir: str, data: np.ndarray,num_samples:int, base_seed: int) -> str:
-    path = Path(out_dir+f"/{idx}_{num_samples}_4.csv")
+    out_dir = Path(out_dir)
+    os.makedirs(out_dir,exist_ok=True)
+    path = out_dir/f"{idx}_{num_samples}_4.csv"
+    
+    
     child_seed = _seed_for_index(base_seed, idx)
     rng = np.random.default_rng(child_seed)
     
@@ -66,7 +70,7 @@ def _run_parallel_from_args(args,data):
         for f in as_completed(futures):
             _ = f.result()  # 例外をここで表面化
             
-#if __name__ == "__main__":
+if __name__ == "__main__":
     import copy
     base_args = _parse_args_parallel()
     l = [
@@ -82,5 +86,5 @@ def _run_parallel_from_args(args,data):
         args.base_seed += n
         print(args.base_seed)
         args.sumples = n
-        args.out_dir = base_args.out_dir + f"/testdata_n{n}"
+        args.out_dir = base_args.out_dir + f"/test_from_base{n}"
         _run_parallel_from_args(args,data)
