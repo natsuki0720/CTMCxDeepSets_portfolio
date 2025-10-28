@@ -6,10 +6,10 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from multiprocessing import get_context
 import argparse
 
-from likelihood import Likelihood_diagonal_exp
-from formate_matrix_toMLData import formate_dataMatrix, matrix_trimer
+from .likelihood import Likelihood_diagonal_exp
+from .formate_matrix_toMLData import formate_dataMatrix, matrix_trimer
 
-from data_generator import (
+from .data_generator import (
     DataGenerator,
     DiagonalTransitionRateMatrixGenerator,
 )
