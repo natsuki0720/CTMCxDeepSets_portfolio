@@ -120,16 +120,13 @@ if __name__ == "__main__":
     import copy
     base_args = _parse_args_parallel()
     l = [
-        100,200,400,600,800,1000
+        5000
     ]
     if not base_args.run_parallel:
         raise SystemExit("run_parallel を有効にしてください")
     
     for n in l:
         args = copy.deepcopy(base_args)
-        print(args.base_seed)
-        args.base_seed += n
-        print(args.base_seed)
         args.min_n = n
         args.max_n = n
         args.out_dir = base_args.out_dir + f"/testdata_n{n}"
