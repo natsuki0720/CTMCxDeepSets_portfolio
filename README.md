@@ -52,16 +52,7 @@ CTMC × DeepSets による推移率推定（Transition Rate Estimation）
 - 集合処理
   - トークン特徴（埋め込み＋Δt）→トークンMLP→注意プーリング→出力MLP。
 
-クイックスタート（推論）
-- 学習済み重みによる評価（バッチ推論）
-  ```bash
-  python notebooks/evaluate_mixed_model.py \
-    --data-dir real_data \
-    --model-path model_weights/mixed_distribution/mixed_0929.pth \
-    --device auto \
-    --batch-size 8 \
-    --output-csv results.csv
-  ```
+
 - オプション
   - --device {auto,cuda,mps,cpu}: 利用デバイス選択（autoはCUDA>MPS>CPUの順に選択）
 
