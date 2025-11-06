@@ -20,7 +20,7 @@ CTMC × DeepSets による推移率推定（Transition Rate Estimation）
 - notebooks/evaluate_mixed_model.py: 学習済み重みを用いた一括推論スクリプト
 - utils/data_generator.py: 合成データ生成およびCTMC遷移確率の計算（解析式）
 - utils/formate_matrix_toMLData.py: 行列のトリミングとベクトル化ユーティリティ
-- utils/likelihood.py: 従来の最適化ベース推定（L-BFGS-B、差分進化、ベイズ最適化）
+- utils/likelihood.py: 従来の最適化ベース推定（L-BFGS-B）
 - real_data/*.csv: 実データ例（pre_state, post_state, delta_t の三列）
 - model_weights/mixed_distribution/mixed_0929.pth: 学習済みモデル重み
 - figs/readme/*.png, figs/result/*.png: 図表（枠組み、数式、結果）
@@ -39,7 +39,7 @@ CTMC × DeepSets による推移率推定（Transition Rate Estimation）
   - pre_state, post_state, delta_t
   - 例: real_data/RCBridge.csv
 - 状態インデックスは 1-based（1,2,3,…）。0 は内部PADとして使用される想定です。
-- 一部のユーティリティは「上部に Q 行列、続いて観測行（3列）」の合成行列にも対応（matrix_trimer）。使用するスクリプトに合わせてファイル形式を選んでください。
+
 
 モデル（models/model_0929.py）
 - 入力
@@ -64,12 +64,10 @@ CTMC × DeepSets による推移率推定（Transition Rate Estimation）
   ```
 - オプション
   - --device {auto,cuda,mps,cpu}: 利用デバイス選択（autoはCUDA>MPS>CPUの順に選択）
-  - --output-csv: 予測と誤差をCSVに保存
-- スクリプトは Lifespan（1/λ）の絶対誤差などを集計して標準出力に要約を表示します。
 
 ノートブック
 - notebooks/notebook_for_real_data.ipynb: 実データの前処理・推論・可視化の手順
-- notebooks/notebook_for_synthetic_data.ipynb: 合成データの生成、学習、評価の一連の流れ
+- notebooks/notebook_for_synthetic_data.ipynb: 合成データの評価の一連の流れ
 
 実験結果（例）
 - ![Bridge Deck](figs/result/result_Bridgedeck.png)
